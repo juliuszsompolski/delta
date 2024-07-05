@@ -213,6 +213,8 @@ trait MergeIntoCommandBase extends LeafRunnableCommand
       createMetric(sc, "number of target partitions to which files were added"),
     "executionTimeMs" ->
       createTimingMetric(sc, "time taken to execute the entire operation"),
+    "materializeSourceTimeMs" ->
+      createTimingMetric(sc, "time taken to materialize source (or determine it's not needed)"),
     "scanTimeMs" ->
       createTimingMetric(sc, "time taken to scan the files for matches"),
     "rewriteTimeMs" ->
@@ -443,6 +445,21 @@ trait MergeIntoCommandBase extends LeafRunnableCommand
         throw DeltaErrors.sourceNotDeterministicInMergeException(spark)
       }
     }
+  }
+
+  override protected def prepareMergeSource(
+      spark: SparkSession,
+      source: LogicalPlan,
+      condition: Expression,
+      matchedClauses: Seq[DeltaMergeIntoMatchedClause],
+      notMatchedClauses: Seq[DeltaMergeIntoNotMatchedClause],
+      isInsertOnly: Boolean
+    ): Unit = recordMergeOperation(
+      extraOpType = "materializeSource",
+      status = "MERGE operation - materialize source",
+      sqlMetricName = "materializeSourceTimeMs") {
+    super.prepareMergeSource(
+      spark, source, condition, matchedClauses, notMatchedClauses, isInsertOnly)
   }
 }
 
