@@ -72,9 +72,8 @@ trait MergeIntoMaterializeSourceTests
       checkpointedDf.collect()
     }
     assert(ex.isInstanceOf[SparkException], ex)
-    assert(
-      ex.getMessage().matches(mergeMaterializedSourceRddBlockLostErrorRegex(rdd.id)),
-      s"RDD id ${rdd.id}: Message: ${ex.getMessage}")
+    assert(ex.asInstanceOf[SparkException].getErrorClass() == "CHECKPOINT_RDD_BLOCK_ID_NOT_FOUND")
+    assert(ex.asInstanceOf[SparkException].getMessageParameters().get("blockId") == rdd.id.toString)
   }
 
 
