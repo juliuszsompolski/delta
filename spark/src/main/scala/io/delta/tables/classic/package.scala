@@ -14,25 +14,12 @@
  * limitations under the License.
  */
 
-package io.delta.tables.execution
+package io.delta.tables
 
 /**
- * DeltaTableBuilder option to indicate whether it's to create / replace the table.
+ * Classic (local Spark) implementation package for Delta tables.
  */
-sealed trait DeltaTableBuilderOptions
-
-/**
- * Specify that the builder is to create a Delta table.
- *
- * @param ifNotExists boolean whether to ignore if the table already exists.
- */
-case class CreateTableOptions(ifNotExists: Boolean) extends DeltaTableBuilderOptions
-
-/**
- * Specify that the builder is to replace a Delta table.
- *
- * @param orCreate boolean whether to create the table if the table doesn't exist.
- */
-case class ReplaceTableOptions(orCreate: Boolean) extends DeltaTableBuilderOptions
-
-
+package object classic {
+  // Register classic implementation as default when this package is loaded
+  io.delta.tables.setDefaultImplementation(DeltaTable)
+}

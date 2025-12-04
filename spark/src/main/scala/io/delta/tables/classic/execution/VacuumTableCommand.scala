@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package io.delta.tables.execution
+package io.delta.tables.classic.execution
 
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}

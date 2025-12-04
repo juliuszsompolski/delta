@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package io.delta.tables.execution
+package io.delta.tables.classic.execution
 
 import scala.collection.Map
 
@@ -41,7 +41,7 @@ import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 /**
  * Interface to provide the actual implementations of DeltaTable operations.
  */
-trait DeltaTableOperations extends AnalysisHelper { self: io.delta.tables.DeltaTable =>
+trait DeltaTableOperations extends AnalysisHelper { self: io.delta.tables.classic.DeltaTable =>
 
   protected def executeDelete(condition: Option[Expression]): Unit = improveUnsupportedOpError {
     withActiveSession(sparkSession) {
@@ -132,7 +132,7 @@ trait DeltaTableOperations extends AnalysisHelper { self: io.delta.tables.DeltaT
       properties: Map[String, String],
       versionAsOf: Option[Long] = None,
       timestampAsOf: Option[String] = None
-  ): io.delta.tables.DeltaTable = withActiveSession(sparkSession) {
+  ): io.delta.tables.classic.DeltaTable = withActiveSession(sparkSession) {
     if (!isShallow) {
       throw DeltaErrors.unsupportedDeepCloneException()
     }
@@ -169,9 +169,9 @@ trait DeltaTableOperations extends AnalysisHelper { self: io.delta.tables.DeltaT
     toDataset(sparkSession, clone)
 
     if (targetIsAbsolutePath) {
-      io.delta.tables.DeltaTable.forPath(sparkSession, target)
+      io.delta.tables.classic.DeltaTable.forPath(sparkSession, target)
     } else {
-      io.delta.tables.DeltaTable.forName(sparkSession, target)
+      io.delta.tables.classic.DeltaTable.forName(sparkSession, target)
     }
   }
 

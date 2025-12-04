@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package io.delta.tables
+package io.delta.tables.connect
 
 import scala.collection.JavaConverters._
 
@@ -27,52 +27,29 @@ import org.apache.spark.sql.connect.ConnectConversions._
 import org.apache.spark.sql.connect.delta.ImplicitProtoConversions._
 
 /**
- * Builder class for constructing OPTIMIZE command and executing.
- *
- * @param sparkSession SparkSession to use for execution
- * @param tableIdentifier Id of the table on which to
- *        execute the optimize
- * @param options Hadoop file system options for read and write.
- * @since 4.0.0
+ * Connect (remote Spark) implementation of DeltaOptimizeBuilder.
  */
 class DeltaOptimizeBuilder private(
     private val sparkSession: SparkSession,
-    private val table: proto.DeltaTable) {
+    private val table: proto.DeltaTable)
+  extends io.delta.tables.DeltaOptimizeBuilder {
+
   private var partitionFilters: Seq[String] = Seq.empty
 
-  /**
-   * Apply partition filter on this optimize command builder to limit
-   * the operation on selected partitions.
-   *
-   * @param partitionFilter The partition filter to apply
-   * @return [[DeltaOptimizeBuilder]] with partition filter applied
-   * @since 4.0.0
-   */
-  def where(partitionFilter: String): DeltaOptimizeBuilder = {
+  /** @inheritdoc */
+  override def where(partitionFilter: String): DeltaOptimizeBuilder = {
     this.partitionFilters = this.partitionFilters :+ partitionFilter
     this
   }
 
-  /**
-   * Compact the small files in selected partitions.
-   *
-   * @return DataFrame containing the OPTIMIZE execution metrics
-   * @since 4.0.0
-   */
-  def executeCompaction(): DataFrame = {
+  /** @inheritdoc */
+  override def executeCompaction(): DataFrame = {
     execute(Seq.empty)
   }
 
-  /**
-   * Z-Order the data in selected partitions using the given columns.
-   *
-   * @param columns Zero or more columns to order the data
-   *                using Z-Order curves
-   * @return DataFrame containing the OPTIMIZE execution metrics
-   * @since 4.0.0
-   */
+  /** @inheritdoc */
   @scala.annotation.varargs
-  def executeZOrderBy(columns: String*): DataFrame = {
+  override def executeZOrderBy(columns: String*): DataFrame = {
     execute(columns)
   }
 
