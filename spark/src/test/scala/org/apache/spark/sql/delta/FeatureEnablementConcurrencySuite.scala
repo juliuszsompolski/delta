@@ -692,12 +692,12 @@ class FeatureEnablementConcurrencySuite
     assert(tableComment.readComment(metadata) === Some("ids"))
   }
 
-  test("Comment change conflicts when metadata conflict resolution is disabled") {
+  test("Comment change conflict resolution - feature enablement conflict resolution disabled") {
     withSQLConf(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED.key -> "false") {
-      assertMetadataChangedConflict(
-        CommentTarget(Some("idCol")).setCommentSql("ids"),
-        losingTxn = Update(rows = Seq(90L), setValue = -1L))
+      assertCommentChangeResolved(
+        CommentTarget(Some("idCol")), losingTxn = Update(rows = Seq(90L), setValue = -1L))
     }
+    assert(spark.table(testTableName).where("idCol = -1").count() === 1)
   }
 
   test("Comment change conflict resolution - removed table comment") {

@@ -332,7 +332,7 @@ private[delta] class ConflictChecker(
     // Check early the protocol and metadata compatibility that is required for subsequent
     // file-level checks.
     checkProtocolCompatibility()
-    resolveCommentConflicts()
+    attemptToResolveCommentsAndDescriptionConflicts()
     if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) {
       attemptToResolveMetadataConflicts()
     } else {
@@ -657,7 +657,7 @@ private[delta] class ConflictChecker(
    * Takes the table comment and column comments of a winning metadata update, unless the current
    * transaction updates metadata itself: comments don't affect how data is written or read.
    */
-  protected def resolveCommentConflicts(): Unit = {
+  protected def attemptToResolveCommentsAndDescriptionConflicts(): Unit = {
     if (winningCommitSummary.metadataUpdates.isEmpty || currentTransactionInfo.metadataChanged) {
       return
     }
@@ -725,6 +725,13 @@ private[delta] class ConflictChecker(
   protected def checkNoMetadataUpdates(): Unit = {
     // If winning commit does not contain metadata update, no conflict.
     if (winningCommitSummary.metadataUpdates.isEmpty) return
+
+    // Nor if the current transaction already has the winning metadata, e.g. after
+    // attemptToResolveCommentsAndDescriptionConflicts().
+    if (!currentTransactionInfo.metadataChanged &&
+        currentTransactionInfo.metadata == winningCommitSummary.metadataUpdates.head) {
+      return
+    }
 
     if (tryResolveRowTrackingEnablementOnlyMetadataUpdateConflict()) {
       return
