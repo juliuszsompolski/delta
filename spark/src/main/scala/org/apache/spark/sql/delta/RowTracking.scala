@@ -165,7 +165,7 @@ object RowTracking {
    * winning commit is tagged as RowTrackingEnablementOnly. It is only safe to call this function if
    * [[RowTracking.canResolveMetadataUpdateConflict]] returns true.
    *
-   * See [[ConflictCheckerEdge.checkNoMetadataUpdates()]] for more details.
+   * See [[ConflictChecker.attemptToResolveMetadataConflicts()]] for more details.
    */
   def resolveRowTrackingEnablementOnlyMetadataUpdateConflict(
       currentTransactionInfo: CurrentTransactionInfo,

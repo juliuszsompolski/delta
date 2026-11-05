@@ -190,7 +190,7 @@ private[delta] class WinningCommitSummary(
 
   // This indicates this commit contains metadata action that is solely for the purpose for
   // updating IDENTITY high water marks. This is used by [[ConflictChecker]] to avoid certain
-  // conflict in [[checkNoMetadataUpdates]].
+  // conflict in [[attemptToResolveMetadataConflicts]].
   val identityOnlyMetadataUpdate = DeltaCommitTag
     .getTagValueFromCommitInfo(commitInfo, DeltaSourceUtils.IDENTITY_COMMITINFO_TAG)
     .exists(_.toBoolean)
@@ -331,11 +331,7 @@ private[delta] class ConflictChecker(
     // Check early the protocol and metadata compatibility that is required for subsequent
     // file-level checks.
     checkProtocolCompatibility()
-    if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) {
-      attemptToResolveMetadataConflicts()
-    } else {
-      checkNoMetadataUpdates()
-    }
+    attemptToResolveMetadataConflicts()
     checkIfDomainMetadataConflict()
 
     // Perform cheap check for transaction dependencies before we start checks files.
@@ -640,8 +636,12 @@ private[delta] class ConflictChecker(
    * name assignments and correctly tag the current commit as not preserving row tracking data. It
    * is not possible to preserve row tracking data prior to the table property being set to true
    * since there is no guarantee of row tracking data being available on all rows.
+   *
+   * With [[DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED]], the allow list of
+   * [[attemptToResolveFeatureEnablementConflicts]] resolves row tracking enablement instead.
    */
   protected def tryResolveRowTrackingEnablementOnlyMetadataUpdateConflict(): Boolean = {
+    if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) return false
     if (RowTracking.canResolveMetadataUpdateConflict(
         currentTransactionInfo, winningCommitSummary)) {
       currentTransactionInfo = RowTracking.resolveRowTrackingEnablementOnlyMetadataUpdateConflict(
@@ -653,7 +653,9 @@ private[delta] class ConflictChecker(
 
   // scalastyle:off line.size.limit
   /**
-   * Check if the committed transaction has changed metadata.
+   * Attempts to resolve metadata conflicts between the current and winning transactions. The
+   * resolvers below take the parts of the winning metadata that the current transaction can commit
+   * with, and anything that still differs conflicts.
    *
    * We want to deal with (and optimize for) the case where the winning commit's metadata update is
    * solely for updating IDENTITY high water marks. In addition, we want to allow a metadata update
@@ -690,40 +692,6 @@ private[delta] class ConflictChecker(
    *
    */
   // scalastyle:on line.size.limit
-  protected def checkNoMetadataUpdates(): Unit = {
-    // If winning commit does not contain metadata update, no conflict.
-    if (winningCommitSummary.metadataUpdates.isEmpty) return
-
-    if (tryResolveRowTrackingEnablementOnlyMetadataUpdateConflict()) {
-      return
-    }
-
-    // The only case in the remaining cases that we will not conflict is winning commit is
-    // identity only metadata update and current commit has no metadata update.
-    val tolerateIdentityOnlyMetadataUpdate = winningCommitSummary.identityOnlyMetadataUpdate &&
-      !currentTransactionInfo.metadataChanged
-
-    if (!tolerateIdentityOnlyMetadataUpdate) {
-      if (winningCommitSummary.identityOnlyMetadataUpdate) {
-        IdentityColumn.logTransactionAbort(deltaLog)
-      }
-      throw DeltaErrors.metadataChangedException(
-        getTableNameOrPath, winningCommitSummary.commitInfo)
-    }
-  }
-
-  /**
-   * Attempts to resolve metadata conflicts between the current and winning transactions.
-   * Currently, we only support the resolution of configuration changes. This is achieved with
-   * the use of an allow-list that defines which configuration changes are allowed.
-   *
-   * We primarily focus on feature enablement. Features should be considered on a case-by-case
-   * basis whether they are eligible for white listing. The main consideration is whether
-   * transactions that produce the output before the feature enablement are safe to commit
-   * with the feature enabled. For some features the answer might be simply yes while some other
-   * features might require reconciliation logic at conflict resolution. Features that require
-   * data rewrite for reconciliation are not good candidates for white listing.
-   */
   protected def attemptToResolveMetadataConflicts(): Unit = {
     def throwMetadataChangedException(): Unit =
       throw DeltaErrors.metadataChangedException(
@@ -741,9 +709,43 @@ private[delta] class ConflictChecker(
     }
 
     // Add all special cases here.
+    if (tryResolveRowTrackingEnablementOnlyMetadataUpdateConflict()) {
+      return
+    }
     if (winningCommitSummary.identityOnlyMetadataUpdate) {
       return
     }
+
+    val winningCommitMetadata = winningCommitSummary.metadataUpdates.head
+    // Without featureEnablement.conflictResolution.enabled, even a metadata update that changes
+    // nothing conflicts.
+    if (!spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED) &&
+        currentTransactionInfo.metadata.diffFieldNames(winningCommitMetadata).isEmpty) {
+      throwMetadataChangedException()
+    }
+
+    attemptToResolveFeatureEnablementConflicts()
+
+    if (currentTransactionInfo.metadata.diffFieldNames(winningCommitMetadata).nonEmpty) {
+      throwMetadataChangedException()
+    }
+    currentTransactionInfo = currentTransactionInfo.copy(metadata = winningCommitMetadata)
+  }
+
+  /**
+   * Takes the configuration and schema changes of the winning metadata update if they are all
+   * allowed. This is achieved with the use of an allow-list that defines which configuration
+   * changes are allowed.
+   *
+   * We primarily focus on feature enablement. Features should be considered on a case-by-case
+   * basis whether they are eligible for white listing. The main consideration is whether
+   * transactions that produce the output before the feature enablement are safe to commit
+   * with the feature enabled. For some features the answer might be simply yes while some other
+   * features might require reconciliation logic at conflict resolution. Features that require
+   * data rewrite for reconciliation are not good candidates for white listing.
+   */
+  protected def attemptToResolveFeatureEnablementConflicts(): Unit = {
+    if (!spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) return
 
     val currentMetadata = currentTransactionInfo.metadata
     val winningCommitMetadata = winningCommitSummary.metadataUpdates.head
@@ -752,7 +754,7 @@ private[delta] class ConflictChecker(
     // We only support the resolution of configuration changes at the moment and metadata
     // only schema changes.
     if (!propertyNamesDiff.subsetOf(Set("configuration", "schemaString"))) {
-      throwMetadataChangedException()
+      return
     }
 
     // Clear configuration changes.
@@ -761,14 +763,14 @@ private[delta] class ConflictChecker(
       configurationChanges = checkConfigurationChangesForConflicts(
         currentMetadata, winningCommitMetadata)
       if (!configurationChanges.areValid) {
-        throwMetadataChangedException()
+        return
       }
     }
 
     // Clear schema changes.
     if (propertyNamesDiff.contains("schemaString")) {
       if (!checkSchemaChangesForConflicts(currentMetadata, winningCommitMetadata)) {
-        throwMetadataChangedException()
+        return
       }
     }
 
@@ -784,7 +786,9 @@ private[delta] class ConflictChecker(
           .map(RowTracking.addRowTrackingNotPreservedTag))
     }
 
-    currentTransactionInfo = currentTransactionInfo.copy(metadata = winningCommitMetadata)
+    currentTransactionInfo = currentTransactionInfo.copy(metadata = currentMetadata.copy(
+      configuration = winningCommitMetadata.configuration,
+      schemaString = winningCommitMetadata.schemaString))
   }
 
   /**
