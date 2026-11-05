@@ -733,9 +733,12 @@ private[delta] class ConflictChecker(
     if (winningCommitSummary.identityOnlyMetadataUpdate) return
 
     attemptToResolveCommentsAndDescriptionConflicts()
-    tryResolveRowTrackingEnablementOnlyMetadataUpdateConflict()
     if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) {
       attemptToResolveFeatureEnablementConflicts()
+    } else {
+      // A commit tagged as row tracking enablement only resolves even with
+      // featureEnablement.conflictResolution.enabled off.
+      tryResolveRowTrackingEnablementOnlyMetadataUpdateConflict()
     }
 
     val winningMetadata = winningCommitSummary.metadataUpdates.head
