@@ -28,6 +28,7 @@ import org.apache.spark.sql.delta.amt.AMTUtils
 import org.apache.spark.sql.delta.catalog.DeltaTableV2
 import org.apache.spark.sql.delta.logging.DeltaLogKeys
 import org.apache.spark.sql.delta.metering.DeltaLogging
+import org.apache.spark.sql.delta.schema.SchemaMergingUtils
 import org.apache.spark.sql.delta.sources.DeltaSourceUtils
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.delta.util.DeltaSparkPlanUtils.CheckDeterministicOptions
@@ -651,6 +652,33 @@ private[delta] class ConflictChecker(
     false
   }
 
+  /**
+   * Takes the table comment and column comments of the winning metadata update: comments don't
+   * affect how data is written or read.
+   */
+  protected def attemptToResolveCommentsAndDescriptionConflicts(): Unit = {
+    val currentMetadata = currentTransactionInfo.metadata
+    val winningMetadata = winningCommitSummary.metadataUpdates.head
+    val winningFields = SchemaMergingUtils.explode(winningMetadata.schema).toMap
+    val schema = SchemaMergingUtils.transformColumns(currentMetadata.schema) { (path, field, _) =>
+      winningFields.get(path :+ field.name).map { winningField =>
+        val metadata = new MetadataBuilder().withMetadata(field.metadata).remove("comment")
+        winningField.getComment().foreach(metadata.putString("comment", _))
+        field.copy(metadata = metadata.build())
+      }.getOrElse(field)
+    }
+    if (schema == currentMetadata.schema &&
+        winningMetadata.description == currentMetadata.description) {
+      return
+    }
+    // diffFieldNames compares schema strings, so take the winning one when the schemas are equal.
+    val schemaString =
+      if (schema == winningMetadata.schema) winningMetadata.schemaString else schema.json
+    val metadataWithWinningComments = currentMetadata.copy(
+      description = winningMetadata.description, schemaString = schemaString)
+    currentTransactionInfo = currentTransactionInfo.copy(metadata = metadataWithWinningComments)
+  }
+
   // scalastyle:off line.size.limit
   /**
    * Attempts to resolve metadata conflicts between the current and winning transactions. The
@@ -724,6 +752,7 @@ private[delta] class ConflictChecker(
       throwMetadataChangedException()
     }
 
+    attemptToResolveCommentsAndDescriptionConflicts()
     attemptToResolveFeatureEnablementConflicts()
 
     if (currentTransactionInfo.metadata.diffFieldNames(winningCommitMetadata).nonEmpty) {
