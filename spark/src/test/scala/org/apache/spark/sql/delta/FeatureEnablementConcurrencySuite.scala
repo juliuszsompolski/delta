@@ -155,7 +155,7 @@ class FeatureEnablementConcurrencySuite
     assert(metadataA.diffFieldNames(metadataB) === expectedDiff,
       """The Metadata properties do not match the expected diff.
         |If you are extending Metadata please check Metadata.diff as well as
-        |ConflictChecker.attemptToResolveMetadataConflicts""".stripMargin)
+        |ConflictChecker.resolveMetadataConflicts""".stripMargin)
 
     val metadataA_1 = Metadata(id = "idA")
     val metadataB_1 = Metadata(id = "idB")
@@ -1245,7 +1245,7 @@ class FeatureEnablementConcurrencySuite
     }
   }
 
-  // Both the loser and winner have metadata updates, so attemptToResolveMetadataConflicts
+  // Both the loser and winner have metadata updates, so resolveMetadataConflicts
   // rejects the loser immediately before the ICT allowlist check runs.
   test("Enable ICT feature - metadata-changing loser fails with DELTA_METADATA_CHANGED") {
     withSQLConf(

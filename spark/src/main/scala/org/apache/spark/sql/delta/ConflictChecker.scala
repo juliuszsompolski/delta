@@ -191,7 +191,7 @@ private[delta] class WinningCommitSummary(
 
   // This indicates this commit contains metadata action that is solely for the purpose for
   // updating IDENTITY high water marks. This is used by [[ConflictChecker]] to avoid certain
-  // conflict in [[checkNoMetadataUpdates]].
+  // conflict in [[resolveMetadataConflicts]].
   val identityOnlyMetadataUpdate = DeltaCommitTag
     .getTagValueFromCommitInfo(commitInfo, DeltaSourceUtils.IDENTITY_COMMITINFO_TAG)
     .exists(_.toBoolean)
@@ -332,12 +332,7 @@ private[delta] class ConflictChecker(
     // Check early the protocol and metadata compatibility that is required for subsequent
     // file-level checks.
     checkProtocolCompatibility()
-    attemptToResolveCommentsAndDescriptionConflicts()
-    if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) {
-      attemptToResolveMetadataConflicts()
-    } else {
-      checkNoMetadataUpdates()
-    }
+    resolveMetadataConflicts()
     checkIfDomainMetadataConflict()
 
     // Perform cheap check for transaction dependencies before we start checks files.
@@ -654,13 +649,10 @@ private[delta] class ConflictChecker(
   }
 
   /**
-   * Takes the table comment and column comments of a winning metadata update, unless the current
-   * transaction updates metadata itself: comments don't affect how data is written or read.
+   * Takes the table comment and column comments of the winning metadata update: comments don't
+   * affect how data is written or read.
    */
   protected def attemptToResolveCommentsAndDescriptionConflicts(): Unit = {
-    if (winningCommitSummary.metadataUpdates.isEmpty || currentTransactionInfo.metadataChanged) {
-      return
-    }
     val currentMetadata = currentTransactionInfo.metadata
     val winningMetadata = winningCommitSummary.metadataUpdates.head
     val winningFields = SchemaMergingUtils.explode(winningMetadata.schema).toMap
@@ -685,7 +677,9 @@ private[delta] class ConflictChecker(
 
   // scalastyle:off line.size.limit
   /**
-   * Check if the committed transaction has changed metadata.
+   * Resolves the winning commit's metadata update. Each resolver takes the part of the winning
+   * metadata that the current transaction can commit with, and anything that still differs after
+   * all of them conflicts.
    *
    * We want to deal with (and optimize for) the case where the winning commit's metadata update is
    * solely for updating IDENTITY high water marks. In addition, we want to allow a metadata update
@@ -699,7 +693,7 @@ private[delta] class ConflictChecker(
    * | Current Metadata (id)                         | Conflict              | Conflict (3)                                  | Conflict                 | No conflict         |
    * | Current Metadata Row Tracking Enablement Only | Conflict (1)          | Conflict (3)                                  | Conflict                 | No conflict         |
    * | Current Metadata (other)                      | Conflict (1)          | Conflict (3)                                  | Conflict                 | No conflict         |
-   * | Current No Metadata                           | No conflict (2)       | No conflict (4)                               | Conflict                 | No conflict         |
+   * | Current No Metadata                           | No conflict (2)       | No conflict (4)                               | Conflict (5)             | No conflict         |
    *
    * The differences in cases (1), (2), (3), and (4) are:
    * (1) This is a case we could have done something to avoid conflict, e.g., current transaction
@@ -719,55 +713,12 @@ private[delta] class ConflictChecker(
    * information only affect the preservation of row tracking. If we copy over the new metadata
    * configurations and mark the current txn as not preserving row tracking, then the current txn
    * is respecting the metadata update and does not need to fail.
+   * (5) Unless [[attemptToResolveCommentsAndDescriptionConflicts]] and
+   * [[attemptToResolveFeatureEnablementConflicts]] take all of the winning metadata update.
    *
    */
   // scalastyle:on line.size.limit
-  protected def checkNoMetadataUpdates(): Unit = {
-    // If winning commit does not contain metadata update, no conflict.
-    if (winningCommitSummary.metadataUpdates.isEmpty) return
-
-    // Nor if the current transaction already has the winning metadata, e.g. after
-    // attemptToResolveCommentsAndDescriptionConflicts().
-    if (!currentTransactionInfo.metadataChanged &&
-        currentTransactionInfo.metadata == winningCommitSummary.metadataUpdates.head) {
-      return
-    }
-
-    if (tryResolveRowTrackingEnablementOnlyMetadataUpdateConflict()) {
-      return
-    }
-
-    // The only case in the remaining cases that we will not conflict is winning commit is
-    // identity only metadata update and current commit has no metadata update.
-    val tolerateIdentityOnlyMetadataUpdate = winningCommitSummary.identityOnlyMetadataUpdate &&
-      !currentTransactionInfo.metadataChanged
-
-    if (!tolerateIdentityOnlyMetadataUpdate) {
-      if (winningCommitSummary.identityOnlyMetadataUpdate) {
-        IdentityColumn.logTransactionAbort(deltaLog)
-      }
-      throw DeltaErrors.metadataChangedException(
-        getTableNameOrPath, winningCommitSummary.commitInfo)
-    }
-  }
-
-  /**
-   * Attempts to resolve metadata conflicts between the current and winning transactions.
-   * Currently, we only support the resolution of configuration changes. This is achieved with
-   * the use of an allow-list that defines which configuration changes are allowed.
-   *
-   * We primarily focus on feature enablement. Features should be considered on a case-by-case
-   * basis whether they are eligible for white listing. The main consideration is whether
-   * transactions that produce the output before the feature enablement are safe to commit
-   * with the feature enabled. For some features the answer might be simply yes while some other
-   * features might require reconciliation logic at conflict resolution. Features that require
-   * data rewrite for reconciliation are not good candidates for white listing.
-   */
-  protected def attemptToResolveMetadataConflicts(): Unit = {
-    def throwMetadataChangedException(): Unit =
-      throw DeltaErrors.metadataChangedException(
-        getTableNameOrPath, winningCommitSummary.commitInfo)
-
+  protected def resolveMetadataConflicts(): Unit = {
     // If winning commit does not contain metadata update, no conflict.
     if (winningCommitSummary.metadataUpdates.isEmpty) return
 
@@ -779,51 +730,65 @@ private[delta] class ConflictChecker(
       throwMetadataChangedException()
     }
 
-    // Add all special cases here.
-    if (winningCommitSummary.identityOnlyMetadataUpdate) {
-      return
+    if (winningCommitSummary.identityOnlyMetadataUpdate) return
+
+    attemptToResolveCommentsAndDescriptionConflicts()
+    tryResolveRowTrackingEnablementOnlyMetadataUpdateConflict()
+    if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) {
+      attemptToResolveFeatureEnablementConflicts()
     }
 
-    val currentMetadata = currentTransactionInfo.metadata
-    val winningCommitMetadata = winningCommitSummary.metadataUpdates.head
-    val propertyNamesDiff = currentMetadata.diffFieldNames(winningCommitMetadata)
-
-    // We only support the resolution of configuration changes at the moment and metadata
-    // only schema changes.
-    if (!propertyNamesDiff.subsetOf(Set("configuration", "schemaString"))) {
+    val winningMetadata = winningCommitSummary.metadataUpdates.head
+    if (currentTransactionInfo.metadata.diffFieldNames(winningMetadata).nonEmpty) {
       throwMetadataChangedException()
     }
+    currentTransactionInfo = currentTransactionInfo.copy(metadata = winningMetadata)
+  }
 
-    // Clear configuration changes.
-    var configurationChanges = ConfigurationChanges(areValid = false)
-    if (propertyNamesDiff.contains("configuration")) {
-      configurationChanges = checkConfigurationChangesForConflicts(
-        currentMetadata, winningCommitMetadata)
-      if (!configurationChanges.areValid) {
-        throwMetadataChangedException()
+  private def throwMetadataChangedException(): Unit =
+    throw DeltaErrors.metadataChangedException(getTableNameOrPath, winningCommitSummary.commitInfo)
+
+  /**
+   * Takes the configuration and the schema of the winning metadata update when all of their
+   * changes are allowed feature enablements, see [[checkConfigurationChangesForConflicts]] and
+   * [[checkSchemaChangesForConflicts]].
+   *
+   * We primarily focus on feature enablement. Features should be considered on a case-by-case
+   * basis whether they are eligible for white listing. The main consideration is whether
+   * transactions that produce the output before the feature enablement are safe to commit
+   * with the feature enabled. For some features the answer might be simply yes while some other
+   * features might require reconciliation logic at conflict resolution. Features that require
+   * data rewrite for reconciliation are not good candidates for white listing.
+   */
+  protected def attemptToResolveFeatureEnablementConflicts(): Unit = {
+    val currentMetadata = currentTransactionInfo.metadata
+    val winningMetadata = winningCommitSummary.metadataUpdates.head
+    var resolvedMetadata = currentMetadata
+
+    if (currentMetadata.configuration != winningMetadata.configuration) {
+      val configurationChanges =
+        checkConfigurationChangesForConflicts(currentMetadata, winningMetadata)
+      if (configurationChanges.areValid) {
+        resolvedMetadata = resolvedMetadata.copy(configuration = winningMetadata.configuration)
+        val rowTrackingEnabled = configurationChanges
+          .addedAndChanged
+          .getOrElse(DeltaConfigs.ROW_TRACKING_ENABLED.key, "false")
+          .toBoolean
+        if (rowTrackingEnabled) {
+          currentTransactionInfo = currentTransactionInfo.copy(
+            commitInfo = currentTransactionInfo
+              .commitInfo
+              .map(RowTracking.addRowTrackingNotPreservedTag))
+        }
       }
     }
 
-    // Clear schema changes.
-    if (propertyNamesDiff.contains("schemaString")) {
-      if (!checkSchemaChangesForConflicts(currentMetadata, winningCommitMetadata)) {
-        throwMetadataChangedException()
-      }
+    if (currentMetadata.schemaString != winningMetadata.schemaString &&
+        checkSchemaChangesForConflicts(currentMetadata, winningMetadata)) {
+      resolvedMetadata = resolvedMetadata.copy(schemaString = winningMetadata.schemaString)
     }
 
-    // Metadata changes are accepted. Consolidate them.
-    val rowTrackingEnabled = configurationChanges
-      .addedAndChanged
-      .getOrElse(DeltaConfigs.ROW_TRACKING_ENABLED.key, "false")
-      .toBoolean
-    if (rowTrackingEnabled) {
-      currentTransactionInfo = currentTransactionInfo.copy(
-        commitInfo = currentTransactionInfo
-          .commitInfo
-          .map(RowTracking.addRowTrackingNotPreservedTag))
-    }
-
-    currentTransactionInfo = currentTransactionInfo.copy(metadata = winningCommitMetadata)
+    currentTransactionInfo = currentTransactionInfo.copy(metadata = resolvedMetadata)
   }
 
   /**
@@ -1506,7 +1471,7 @@ private[delta] class ConflictChecker(
     //
     // A fourth case -- neither has ICT -- is impossible. The guard above ensures ICT is enabled
     // in the current transaction's metadata, which is either the transaction's own or was
-    // adopted from a winning commit by attemptToResolveMetadataConflicts(). In either case,
+    // adopted from a winning commit by resolveMetadataConflicts(). In either case,
     // at least one of the two commits must carry an inCommitTimestamp.
 
     // Use the winning commit's ICT timestamp if available. If the winning commit predates ICT
