@@ -372,6 +372,29 @@ class RowTrackingConflictResolutionSuite extends QueryTest
     }
   }
 
+  for (featureEnablementConflictResolution <- DeltaTestUtils.BOOLEAN_DOMAIN)
+  test("RowTrackingEnablementOnly metadata update that changes other properties fails txns " +
+      "that don't update metadata - featureEnablementConflictResolution: " +
+      s"$featureEnablementConflictResolution") {
+    withTestTable {
+      withSQLConf(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED.key ->
+          featureEnablementConflictResolution.toString) {
+        val txn = deltaLog.startTransaction()
+        activateRowTracking()
+        val winningTxn = deltaLog.startTransaction()
+        val metadata = addRowTrackingEnabledConfigToMetadata(latestSnapshot.metadata)
+        winningTxn.updateMetadata(
+          metadata.copy(configuration = metadata.configuration + ("key" -> "value")))
+        winningTxn.commit(
+          Nil, ManualUpdate, Map(DeltaCommitTag.RowTrackingEnablementOnlyTag.key -> "true"))
+
+        intercept[MetadataChangedException] {
+          txn.commit(Seq(addFile(path = "file_path")), DeltaOperations.ManualUpdate)
+        }
+      }
+    }
+  }
+
   test("RowTrackingEnablementOnly metadata update fails transactions "
       + "that perform a metadata update") {
     withTestTable {

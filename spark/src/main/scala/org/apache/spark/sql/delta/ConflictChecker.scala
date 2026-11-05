@@ -638,18 +638,15 @@ private[delta] class ConflictChecker(
    * is not possible to preserve row tracking data prior to the table property being set to true
    * since there is no guarantee of row tracking data being available on all rows.
    *
-   * With [[DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED]], the allow list of
-   * [[attemptToResolveFeatureEnablementConflicts]] resolves row tracking enablement instead.
+   * [[attemptToResolveFeatureEnablementConflicts]] can take the same properties from a commit
+   * without the RowTrackingEnablementOnly tag.
    */
-  protected def tryResolveRowTrackingEnablementOnlyMetadataUpdateConflict(): Boolean = {
-    if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) return false
+  protected def attemptToResolveRowTrackingEnablementOnlyConflicts(): Unit = {
     if (RowTracking.canResolveMetadataUpdateConflict(
         currentTransactionInfo, winningCommitSummary)) {
       currentTransactionInfo = RowTracking.resolveRowTrackingEnablementOnlyMetadataUpdateConflict(
         currentTransactionInfo, winningCommitSummary)
-      return true
     }
-    false
   }
 
   /**
@@ -737,24 +734,17 @@ private[delta] class ConflictChecker(
     }
 
     // Add all special cases here.
-    if (tryResolveRowTrackingEnablementOnlyMetadataUpdateConflict()) {
-      return
-    }
     if (winningCommitSummary.identityOnlyMetadataUpdate) {
       return
     }
 
-    val winningCommitMetadata = winningCommitSummary.metadataUpdates.head
-    // Without featureEnablement.conflictResolution.enabled, even a metadata update that changes
-    // nothing conflicts.
-    if (!spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED) &&
-        currentTransactionInfo.metadata.diffFieldNames(winningCommitMetadata).isEmpty) {
-      throwMetadataChangedException()
-    }
-
+    attemptToResolveRowTrackingEnablementOnlyConflicts()
+    // Runs before attemptToResolveFeatureEnablementConflicts, which takes nothing while other
+    // changes remain.
     attemptToResolveCommentsAndDescriptionConflicts()
     attemptToResolveFeatureEnablementConflicts()
 
+    val winningCommitMetadata = winningCommitSummary.metadataUpdates.head
     if (currentTransactionInfo.metadata.diffFieldNames(winningCommitMetadata).nonEmpty) {
       throwMetadataChangedException()
     }
@@ -835,10 +825,7 @@ private[delta] class ConflictChecker(
   /** Allow list for [[checkConfigurationChangesForConflicts]]. */
   private lazy val metadataConfigurationChangeAllowList: Set[String] = {
     val rowTrackingAllowList =
-        Set(
-          MaterializedRowId.MATERIALIZED_COLUMN_NAME_PROP,
-          MaterializedRowCommitVersion.MATERIALIZED_COLUMN_NAME_PROP,
-          DeltaConfigs.ROW_TRACKING_ENABLED.key)
+        RowTracking.enablementTableProperties
 
     // We can suppress column mapping enablement conflict error since we do not need any
     // data rewrite to reconcile the txns. No metadata is pushed to the parquet

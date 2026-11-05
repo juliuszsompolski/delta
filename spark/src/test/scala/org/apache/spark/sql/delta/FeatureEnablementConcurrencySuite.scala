@@ -413,6 +413,25 @@ class FeatureEnablementConcurrencySuite
     assert(!result16.areValid)
   }
 
+  for (featureEnablementConflictResolution <- BOOLEAN_DOMAIN)
+  test("Metadata update that changes nothing doesn't conflict - " +
+      s"featureEnablementConflictResolution: $featureEnablementConflictResolution") {
+    withSQLConf(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED.key ->
+        featureEnablementConflictResolution.toString) {
+      val (deltaLog, catalogTable) = createTestTable(Seq("'key' = 'value'"))
+      val ctx = new TestContext(deltaLog)
+      val snapshotBefore = deltaLog.update(catalogTableOpt = Some(catalogTable))
+
+      Update(rows = Seq(90L), setValue = -1L).interleave(ctx) {
+        AlterTableProperty(property = "key", value = "value").execute(ctx)
+      }
+
+      val (_, actions) = deltaLog.getChanges(snapshotBefore.version + 1, Some(catalogTable)).next()
+      assert(actions.collect { case m: Metadata => m } === Seq(snapshotBefore.metadata))
+    }
+    assert(spark.table(testTableName).where("idCol = -1").count() === 1)
+  }
+
   test("CatalogOwned and VacuumProtocolCheck features allow concurrent txns at upgrade") {
     assert(!CatalogOwnedTableFeature.failConcurrentTransactionsAtUpgrade)
     assert(!VacuumProtocolCheckTableFeature.failConcurrentTransactionsAtUpgrade)
