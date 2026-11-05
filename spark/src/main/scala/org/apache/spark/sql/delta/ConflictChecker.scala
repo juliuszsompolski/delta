@@ -332,12 +332,11 @@ private[delta] class ConflictChecker(
     // Check early the protocol and metadata compatibility that is required for subsequent
     // file-level checks.
     checkProtocolCompatibility()
-    if (!tryResolveCommentOnlyMetadataUpdateConflict()) {
-      if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) {
-        attemptToResolveMetadataConflicts()
-      } else {
-        checkNoMetadataUpdates()
-      }
+    resolveCommentConflicts()
+    if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) {
+      attemptToResolveMetadataConflicts()
+    } else {
+      checkNoMetadataUpdates()
     }
     checkIfDomainMetadataConflict()
 
@@ -655,31 +654,34 @@ private[delta] class ConflictChecker(
   }
 
   /**
-   * Resolves a winning metadata update that only changes the table comment or column comments.
-   * Comments don't affect how data is written or read, so a current transaction that doesn't
-   * update metadata itself can commit with the winning metadata.
+   * Takes the table comment and column comments of a winning metadata update, unless the current
+   * transaction updates metadata itself: comments don't affect how data is written or read.
    */
-  protected def tryResolveCommentOnlyMetadataUpdateConflict(): Boolean = {
+  protected def resolveCommentConflicts(): Unit = {
     if (winningCommitSummary.metadataUpdates.isEmpty || currentTransactionInfo.metadataChanged) {
-      return false
+      return
     }
     val currentMetadata = currentTransactionInfo.metadata
     val winningMetadata = winningCommitSummary.metadataUpdates.head
-    val changedFields = currentMetadata.diffFieldNames(winningMetadata)
-    val onlyCommentsChanged = changedFields.nonEmpty &&
-      changedFields.subsetOf(Set("description", "schemaString")) &&
-      dropComments(currentMetadata.schema) == dropComments(winningMetadata.schema)
-    if (onlyCommentsChanged) {
-      currentTransactionInfo = currentTransactionInfo.copy(metadata = winningMetadata)
+    val winningFields = SchemaMergingUtils.explode(winningMetadata.schema).toMap
+    val schema = SchemaMergingUtils.transformColumns(currentMetadata.schema) { (path, field, _) =>
+      winningFields.get(path :+ field.name).map { winningField =>
+        val metadata = new MetadataBuilder().withMetadata(field.metadata).remove("comment")
+        winningField.getComment().foreach(metadata.putString("comment", _))
+        field.copy(metadata = metadata.build())
+      }.getOrElse(field)
     }
-    onlyCommentsChanged
+    if (schema == currentMetadata.schema &&
+        winningMetadata.description == currentMetadata.description) {
+      return
+    }
+    // diffFieldNames compares schema strings, so take the winning one when the schemas are equal.
+    val schemaString =
+      if (schema == winningMetadata.schema) winningMetadata.schemaString else schema.json
+    val metadataWithWinningComments = currentMetadata.copy(
+      description = winningMetadata.description, schemaString = schemaString)
+    currentTransactionInfo = currentTransactionInfo.copy(metadata = metadataWithWinningComments)
   }
-
-  private def dropComments(schema: StructType): StructType =
-    SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
-      val metadata = new MetadataBuilder().withMetadata(field.metadata).remove("comment").build()
-      field.copy(metadata = metadata)
-    }
 
   // scalastyle:off line.size.limit
   /**
