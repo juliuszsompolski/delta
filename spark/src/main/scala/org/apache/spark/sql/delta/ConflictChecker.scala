@@ -332,10 +332,12 @@ private[delta] class ConflictChecker(
     // Check early the protocol and metadata compatibility that is required for subsequent
     // file-level checks.
     checkProtocolCompatibility()
-    if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) {
-      attemptToResolveMetadataConflicts()
-    } else {
-      checkNoMetadataUpdates()
+    if (!tryResolveCommentOnlyMetadataUpdateConflict()) {
+      if (spark.conf.get(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED)) {
+        attemptToResolveMetadataConflicts()
+      } else {
+        checkNoMetadataUpdates()
+      }
     }
     checkIfDomainMetadataConflict()
 
@@ -652,6 +654,33 @@ private[delta] class ConflictChecker(
     false
   }
 
+  /**
+   * Resolves a winning metadata update that only changes the table comment or column comments.
+   * Comments don't affect how data is written or read, so a current transaction that doesn't
+   * update metadata itself can commit with the winning metadata.
+   */
+  protected def tryResolveCommentOnlyMetadataUpdateConflict(): Boolean = {
+    if (winningCommitSummary.metadataUpdates.isEmpty || currentTransactionInfo.metadataChanged) {
+      return false
+    }
+    val currentMetadata = currentTransactionInfo.metadata
+    val winningMetadata = winningCommitSummary.metadataUpdates.head
+    val changedFields = currentMetadata.diffFieldNames(winningMetadata)
+    val onlyCommentsChanged = changedFields.nonEmpty &&
+      changedFields.subsetOf(Set("description", "schemaString")) &&
+      dropComments(currentMetadata.schema) == dropComments(winningMetadata.schema)
+    if (onlyCommentsChanged) {
+      currentTransactionInfo = currentTransactionInfo.copy(metadata = winningMetadata)
+    }
+    onlyCommentsChanged
+  }
+
+  private def dropComments(schema: StructType): StructType =
+    SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
+      val metadata = new MetadataBuilder().withMetadata(field.metadata).remove("comment").build()
+      field.copy(metadata = metadata)
+    }
+
   // scalastyle:off line.size.limit
   /**
    * Check if the committed transaction has changed metadata.
@@ -715,9 +744,8 @@ private[delta] class ConflictChecker(
 
   /**
    * Attempts to resolve metadata conflicts between the current and winning transactions.
-   * Currently, we support the resolution of configuration changes, metadata-only schema changes
-   * and comment changes. Configuration changes are resolved with an allow-list that defines
-   * which configuration changes are allowed.
+   * Currently, we only support the resolution of configuration changes. This is achieved with
+   * the use of an allow-list that defines which configuration changes are allowed.
    *
    * We primarily focus on feature enablement. Features should be considered on a case-by-case
    * basis whether they are eligible for white listing. The main consideration is whether
@@ -751,7 +779,9 @@ private[delta] class ConflictChecker(
     val winningCommitMetadata = winningCommitSummary.metadataUpdates.head
     val propertyNamesDiff = currentMetadata.diffFieldNames(winningCommitMetadata)
 
-    if (!propertyNamesDiff.subsetOf(resolvableMetadataFieldNames)) {
+    // We only support the resolution of configuration changes at the moment and metadata
+    // only schema changes.
+    if (!propertyNamesDiff.subsetOf(Set("configuration", "schemaString"))) {
       throwMetadataChangedException()
     }
 
@@ -798,14 +828,6 @@ private[delta] class ConflictChecker(
       changed: Map[String, String] = Map.empty) {
     def addedAndChanged : Map[String, String] = added ++ changed
   }
-
-  /**
-   * Metadata fields whose changes can be resolved: allow-listed configuration changes,
-   * metadata-only schema changes (see [[checkSchemaChangesForConflicts]], which ignores column
-   * comments) and the table comment (`description`). Comments don't affect how data is
-   * written or read.
-   */
-  private val resolvableMetadataFieldNames = Set("configuration", "schemaString", "description")
 
   /** Allow list for [[checkConfigurationChangesForConflicts]]. */
   private lazy val metadataConfigurationChangeAllowList: Set[String] = {
@@ -1008,20 +1030,20 @@ private[delta] class ConflictChecker(
       currentMetadata: Metadata,
       winningMetadata: Metadata): Boolean = {
 
-    val currentSchema = dropComments(currentMetadata.schema)
-    val winningSchema = dropComments(winningMetadata.schema)
+    val currentSchema = currentMetadata.schema
+    val winningSchema = winningMetadata.schema
 
     if (currentSchema.fields.length != winningSchema.fields.length) {
       return false
     }
 
-    // Besides comments, we only support column mapping metadata changes, while column mapping
-    // is being enabled.
+    // Currently we only support column mapping metadata changes. If column mapping is not
+    // enabled fail (assumes the method was called because schema changes were detected).
     val columnMappingEnabled =
       currentMetadata.columnMappingMode == NoMapping &&
       winningMetadata.columnMappingMode == NameMapping
     if (!columnMappingEnabled) {
-      return currentSchema == winningSchema
+      return false
     }
 
     val allowedMetadataFields = DeltaColumnMapping.COLUMN_MAPPING_METADATA_KEYS
@@ -1050,12 +1072,6 @@ private[delta] class ConflictChecker(
 
     true
   }
-
-  private def dropComments(schema: StructType): StructType =
-    SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
-      val metadata = new MetadataBuilder().withMetadata(field.metadata).remove("comment").build()
-      field.copy(metadata = metadata)
-    }
 
   /**
    * Filters the [[files]] list with the partition predicates of the current transaction

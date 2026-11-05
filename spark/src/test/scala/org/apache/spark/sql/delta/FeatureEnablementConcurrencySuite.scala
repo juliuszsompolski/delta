@@ -692,12 +692,12 @@ class FeatureEnablementConcurrencySuite
     assert(tableComment.readComment(metadata) === Some("ids"))
   }
 
-  test("Comment change conflicts when metadata conflict resolution is disabled") {
+  test("Comment change conflict resolution - feature enablement conflict resolution disabled") {
     withSQLConf(DeltaSQLConf.FEATURE_ENABLEMENT_CONFLICT_RESOLUTION_ENABLED.key -> "false") {
-      assertMetadataChangedConflict(
-        CommentTarget(Some("idCol")).setCommentSql("ids"),
-        losingTxn = Update(rows = Seq(90L), setValue = -1L))
+      assertCommentChangeResolved(
+        CommentTarget(Some("idCol")), losingTxn = Update(rows = Seq(90L), setValue = -1L))
     }
+    assert(spark.table(testTableName).where("idCol = -1").count() === 1)
   }
 
   test("Comment change conflict resolution - removed table comment") {
@@ -739,20 +739,19 @@ class FeatureEnablementConcurrencySuite
     assert(CommentTarget(Some("nested.field")).readComment(metadata) === None)
   }
 
-  test("Comment change conflict resolution - table comment set while enabling column mapping") {
-    val (deltaLog, catalogTable) = createTestTable()
+  test("Metadata change beyond comments conflicts - table comment set while enabling column " +
+      "mapping") {
+    // Comments are only resolved in a metadata update that changes nothing else.
+    val (deltaLog, _) = createTestTable()
     val ctx = new TestContext(deltaLog)
+    val losingTxn = Update(rows = Seq(90L), setValue = -1L)
 
-    Update(rows = Seq(90L), setValue = -1L).interleave(ctx) {
-      MetadataStatement("ALTER TABLE <table> SET TBLPROPERTIES " +
-        s"('${DeltaConfigs.COLUMN_MAPPING_MODE.key}' = '${NameMapping.name}', 'comment' = 'ids')")
-        .execute(ctx)
-    }
-
-    assert(spark.table(testTableName).where("idCol = -1").count() === 1)
-    val metadata = deltaLog.update(catalogTableOpt = Some(catalogTable)).metadata
-    assert(metadata.columnMappingMode === NameMapping)
-    assert(tableComment.readComment(metadata) === Some("ids"))
+    losingTxn.start(ctx)
+    MetadataStatement("ALTER TABLE <table> SET TBLPROPERTIES " +
+      s"('${DeltaConfigs.COLUMN_MAPPING_MODE.key}' = '${NameMapping.name}', 'comment' = 'ids')")
+      .execute(ctx)
+    val e = intercept[SparkException](losingTxn.commit(ctx))
+    assert(e.getCause.asInstanceOf[DeltaThrowable].getErrorClass() === "DELTA_METADATA_CHANGED")
   }
 
   /** A metadata change beyond comments, and the table properties its statement needs. */
@@ -777,8 +776,8 @@ class FeatureEnablementConcurrencySuite
     ChangeBeyondComments("widened nested field",
       "ALTER TABLE <table> ALTER COLUMN nested.field TYPE BIGINT",
       Seq(s"'${DeltaConfigs.ENABLE_TYPE_WIDENING.key}' = 'true'")),
-    // Enabling column mapping adds column mapping metadata to nested fields. That metadata is
-    // part of the data type, where only comment changes are resolved.
+    // Enabling column mapping adds column mapping metadata to nested fields, which
+    // checkSchemaChangesForConflicts rejects.
     ChangeBeyondComments("column mapping enablement with nested columns",
       "ALTER TABLE <table> SET TBLPROPERTIES ('delta.columnMapping.mode' = 'name')"))
 
